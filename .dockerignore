@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+.env
+data/uploads/
+data/*.db
+tests/
+.git/
+# demo_data/corpus_repo/ trimmed 2026-08-19 from 3106 files/97MB to 3
+# curated pairs (~1MB) -- see demo_data/SOURCES.md. Small enough now to
+# ship in the image; not excluded. Its nested .git/ (from the original
+# clone) is still covered by the ".git/" rule above regardless of depth.

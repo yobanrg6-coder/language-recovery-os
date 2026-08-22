@@ -1,0 +1,362 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Language Recovery OS</title>
+<style>
+  :root {
+    --bg: #f7f7f2; --panel: #ffffff; --border: #e5e8e1; --fill: #f0f2ec; --text: #1c2420; --muted: #6c7d70;
+    --accent: #a9805c; --accent-strong: #8a6547; --accent2: #6fa17a; --accent2-strong: #4f7d5a;
+    --supported: #1f8a4c; --hypothesis: #128075; --review: #a9760a;
+    --conflict: #a8432e; --validated: #7a4f81; --error: #a8432e;
+    --shadow: 0 1px 2px rgba(28,36,32,0.04), 0 6px 16px rgba(28,36,32,0.06);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, "SF Pro Text", Segoe UI, Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+  header { padding: 40px 32px 8px; max-width: 1000px; margin: 0 auto; }
+  header h1 { margin: 0 0 6px; font-size: 30px; font-weight: 700; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.5; max-width: 720px; }
+  main { max-width: 1000px; margin: 0 auto; padding: 20px 32px 64px; }
+  .zones { display: grid; grid-template-columns: 1fr; gap: 20px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 18px; padding: 22px 24px; box-shadow: var(--shadow); }
+  .panel h2 { margin: 0 0 14px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.07em; font-weight: 700; }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; font-weight: 500; }
+  input[type=text], select { width: 100%; background: var(--fill); color: var(--text); border: 1px solid transparent;
+    border-radius: 10px; padding: 10px 12px; font-size: 14px; font-family: inherit; }
+  input[type=text]:focus, select:focus { outline: none; border-color: var(--accent2); background: var(--panel); }
+  button { background: var(--accent); color: #ffffff; border: none; border-radius: 999px;
+    padding: 11px 20px; font-weight: 600; cursor: pointer; font-size: 14px; transition: background 0.15s ease, transform 0.1s ease; }
+  button:hover:not(:disabled) { background: var(--accent-strong); }
+  button:active:not(:disabled) { transform: scale(0.98); }
+  button.secondary { background: var(--fill); color: var(--accent2-strong); border: 1px solid var(--accent2); }
+  button.secondary:hover:not(:disabled) { background: rgba(111,161,122,0.12); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .file-row { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 10px; align-items: end; margin-bottom: 10px; }
+  #source-list { margin-top: 6px; }
+  .source-chip { display: inline-flex; align-items: center; gap: 8px; background: var(--fill); border: 1px solid var(--border);
+    border-radius: 999px; padding: 6px 12px; margin: 0 8px 8px 0; font-size: 13px; }
+  .source-chip .type { color: var(--muted); }
+  .actions { display: flex; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+  #log { display: flex; flex-direction: column; gap: 8px; max-height: 340px; overflow-y: auto; }
+  .event { border-left: 3px solid var(--border); padding: 6px 12px; font-size: 13px; }
+  .event.status { color: var(--muted); border-left-color: var(--accent); }
+  .event.error { color: var(--error); border-left-color: var(--error); }
+  .event.complete { color: var(--supported); border-left-color: var(--supported); font-weight: 600; }
+  .claim-card { border: 1px solid var(--border); border-radius: 14px; padding: 16px 18px; margin-bottom: 12px; }
+  .claim-card h3 { margin: 0 0 4px; font-size: 15px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .badge { display: inline-block; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; }
+  .badge.SUPPORTED { background: rgba(31,138,76,0.12); color: var(--supported); }
+  .badge.HYPOTHESIS { background: rgba(18,128,117,0.12); color: var(--hypothesis); }
+  .badge.NEEDS_VALIDATION, .badge.EXTRACTED { background: rgba(169,118,10,0.14); color: var(--review); }
+  .badge.CONFLICTED { background: rgba(168,67,46,0.12); color: var(--conflict); }
+  .badge.COMMUNITY_VALIDATED { background: rgba(122,79,129,0.12); color: var(--validated); }
+  .confidence { color: var(--muted); font-size: 13px; margin: 4px 0; }
+  .evidence-list { margin: 8px 0 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
+  .evidence-list li { margin-bottom: 4px; }
+  .stance-supports { color: var(--supported); }
+  .stance-contradicts { color: var(--conflict); }
+  .stance-related { color: var(--muted); }
+  .linguist-box { margin-top: 8px; font-size: 13px; background: var(--fill); border-radius: 10px; padding: 10px 12px; }
+  .validate-box { margin-top: 10px; padding: 12px 14px; background: rgba(169,128,92,0.08); border: 1px solid rgba(169,128,92,0.35); border-radius: 12px; }
+  .validate-box input { margin-bottom: 8px; }
+  .summary-row { display: flex; gap: 24px; flex-wrap: wrap; }
+  .summary-stat { text-align: center; }
+  .summary-stat .n { font-size: 24px; font-weight: 700; }
+  .summary-stat .label { font-size: 12px; color: var(--muted); }
+
+  @keyframes stage-reveal { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  .stage-reveal { animation: stage-reveal 0.4s ease-out; }
+  @media (prefers-reduced-motion: reduce) { .stage-reveal { animation: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Language Recovery OS</h1>
+  <p>Turn fragmented language archives into living, validated knowledge. Agents propose transcriptions,
+  retrieve evidence and flag conflicts - every claim keeps its evidence and provenance, and the
+  accept / hypothesis / human-validation decision is always computed in Python, never asserted by a model.</p>
+</header>
+<main>
+  <div class="zones">
+
+    <section class="panel" id="archive-panel">
+      <h2>Archive</h2>
+      <div class="actions">
+        <button id="load-demo-btn">Load Mapudungun demo archive</button>
+        <button class="secondary" id="toggle-upload-btn" type="button">Upload my own files</button>
+      </div>
+
+      <div id="upload-form" style="display:none; margin-top: 16px;">
+        <label for="job-name">Project name</label>
+        <input type="text" id="job-name" value="Archive Upload" />
+        <div id="file-rows"></div>
+        <button class="secondary" type="button" id="add-file-row-btn">+ Add file</button>
+        <div class="actions">
+          <button id="create-job-btn">Create job from these files</button>
+        </div>
+      </div>
+
+      <div id="job-summary" style="display:none; margin-top: 16px;">
+        <div id="source-list"></div>
+        <div class="actions">
+          <button id="process-btn">Process Archive</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="agents-panel" style="display:none;">
+      <h2>Agents</h2>
+      <div id="log"></div>
+    </section>
+
+    <section class="panel" id="knowledge-panel" style="display:none;">
+      <h2>Knowledge</h2>
+      <div class="summary-row" id="summary-row"></div>
+      <div id="claims" style="margin-top: 16px;"></div>
+    </section>
+
+  </div>
+</main>
+
+<script>
+const API_KEY_PARAM = new URLSearchParams(location.search).get('api_key') || '';
+let currentJob = null;
+const claimEls = {};
+
+const $ = (id) => document.getElementById(id);
+
+function logEvent(kind, text) {
+  const panel = $('agents-panel');
+  panel.style.display = 'block';
+  const div = document.createElement('div');
+  div.className = `event ${kind} stage-reveal`;
+  div.textContent = text;
+  $('log').appendChild(div);
+  $('log').scrollTop = $('log').scrollHeight;
+}
+
+// --- Upload form -----------------------------------------------------
+
+const SOURCE_TYPES = ['audio', 'dictionary', 'grammar', 'corpus', 'text'];
+const ACCESS_LEVELS = ['PUBLIC', 'COMMUNITY_ONLY', 'RESEARCH_ONLY', 'RESTRICTED', 'SACRED_DO_NOT_PROCESS'];
+
+function addFileRow() {
+  const row = document.createElement('div');
+  row.className = 'file-row';
+  const typeOptions = SOURCE_TYPES.map(t => `<option value="${t}">${t}</option>`).join('');
+  const accessOptions = ACCESS_LEVELS.map(a => `<option value="${a}">${a}</option>`).join('');
+  row.innerHTML = `
+    <div><label>File</label><input type="file" class="row-file" /></div>
+    <div><label>Type</label><select class="row-type">${typeOptions}</select></div>
+    <div><label>Access</label><select class="row-access">${accessOptions}</select></div>
+  `;
+  $('file-rows').appendChild(row);
+}
+
+$('toggle-upload-btn').addEventListener('click', () => {
+  const form = $('upload-form');
+  form.style.display = form.style.display === 'none' ? 'block' : 'none';
+  if (form.style.display === 'block' && $('file-rows').children.length === 0) addFileRow();
+});
+$('add-file-row-btn').addEventListener('click', addFileRow);
+
+$('create-job-btn').addEventListener('click', async () => {
+  const rows = [...$('file-rows').querySelectorAll('.file-row')];
+  const files = [];
+  const manifest = [];
+  for (const row of rows) {
+    const fileInput = row.querySelector('.row-file');
+    if (!fileInput.files.length) continue;
+    files.push(fileInput.files[0]);
+    manifest.push({
+      source_type: row.querySelector('.row-type').value,
+      access_level: row.querySelector('.row-access').value,
+    });
+  }
+  if (!files.length) { alert('Add at least one file.'); return; }
+
+  const formData = new FormData();
+  formData.append('job_name', $('job-name').value || 'Archive Upload');
+  formData.append('manifest', JSON.stringify(manifest));
+  for (const f of files) formData.append('files', f);
+
+  $('create-job-btn').disabled = true;
+  try {
+    const res = await fetch('/api/jobs', { method: 'POST', body: formData });
+    if (!res.ok) throw new Error(await res.text());
+    currentJob = await res.json();
+    showJobSummary(currentJob);
+  } catch (err) {
+    alert('Could not create job: ' + err.message);
+  } finally {
+    $('create-job-btn').disabled = false;
+  }
+});
+
+$('load-demo-btn').addEventListener('click', async () => {
+  $('load-demo-btn').disabled = true;
+  try {
+    const res = await fetch('/api/jobs/demo', { method: 'POST' });
+    if (!res.ok) throw new Error(await res.text());
+    currentJob = await res.json();
+    showJobSummary(currentJob);
+  } catch (err) {
+    alert('Could not load demo archive: ' + err.message);
+  } finally {
+    $('load-demo-btn').disabled = false;
+  }
+});
+
+function showJobSummary(job) {
+  $('job-summary').style.display = 'block';
+  const list = $('source-list');
+  list.innerHTML = '';
+  for (const s of job.sources) {
+    const chip = document.createElement('span');
+    chip.className = 'source-chip';
+    chip.innerHTML = `<span class="type">${s.source_type}</span> ${s.filename}`;
+    list.appendChild(chip);
+  }
+}
+
+// --- Process Archive (SSE) --------------------------------------------
+
+$('process-btn').addEventListener('click', () => {
+  if (!currentJob) return;
+  $('process-btn').disabled = true;
+  $('log').innerHTML = '';
+  $('claims').innerHTML = '';
+  $('knowledge-panel').style.display = 'block';
+
+  const url = `/api/jobs/${currentJob.job_id}/process-stream` + (API_KEY_PARAM ? `?api_key=${encodeURIComponent(API_KEY_PARAM)}` : '');
+  const source = new EventSource(url);
+
+  source.onmessage = (evt) => {
+    const data = JSON.parse(evt.data);
+    handleEvent(data);
+    if (data.type === 'complete' || data.type === 'error') {
+      source.close();
+      $('process-btn').disabled = false;
+    }
+  };
+  source.onerror = () => {
+    logEvent('error', 'Connection to the agent stream was lost.');
+    source.close();
+    $('process-btn').disabled = false;
+  };
+});
+
+function handleEvent(data) {
+  if (data.type === 'status') {
+    logEvent('status', `[${data.agent}] ${data.message}`);
+  } else if (data.type === 'error') {
+    logEvent('error', data.message);
+  } else if (data.type === 'agent_result') {
+    logEvent('status', `[${data.agent}] result received`);
+    if (data.agent === 'ScoringEngine' && data.data && data.data.claim_id) {
+      upsertClaimCard(data.data);
+    }
+  } else if (data.type === 'complete') {
+    logEvent('complete', data.message);
+    renderSummary(data.data);
+    for (const claim of data.data.claims) upsertClaimCard(claim);
+  }
+}
+
+// --- Knowledge / claim cards --------------------------------------------
+
+function renderSummary(job) {
+  const counts = { SUPPORTED: 0, HYPOTHESIS: 0, NEEDS_VALIDATION: 0, CONFLICTED: 0, COMMUNITY_VALIDATED: 0 };
+  for (const c of job.claims) counts[c.status] = (counts[c.status] || 0) + 1;
+  const row = $('summary-row');
+  row.innerHTML = '';
+  for (const [label, n] of Object.entries(counts)) {
+    const stat = document.createElement('div');
+    stat.className = 'summary-stat';
+    stat.innerHTML = `<div class="n">${n}</div><div class="label">${label.replace('_', ' ')}</div>`;
+    row.appendChild(stat);
+  }
+}
+
+function upsertClaimCard(claim) {
+  let el = claimEls[claim.claim_id];
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'claim-card stage-reveal';
+    claimEls[claim.claim_id] = el;
+    $('claims').appendChild(el);
+  }
+  const pct = claim.combined_confidence != null ? Math.round(claim.combined_confidence * 100) : null;
+  const evidenceHtml = (claim.evidence || []).map(e => `
+    <li class="stance-${e.stance}"><strong>${e.stance}</strong> (${(e.support_score * 100).toFixed(0)}%)
+      - ${escapeHtml(e.source_id)} <em>${escapeHtml(e.locator)}</em>: ${escapeHtml(e.snippet).slice(0, 160)}</li>
+  `).join('');
+  const linguistHtml = claim.linguist_proposal ? `
+    <div class="linguist-box">
+      <strong>Meaning hypothesis:</strong> ${escapeHtml(claim.linguist_proposal.meaning_translation)}<br/>
+      ${claim.linguist_proposal.lemma ? `<strong>Lemma:</strong> ${escapeHtml(claim.linguist_proposal.lemma)}<br/>` : ''}
+      <span style="color:var(--muted)">${escapeHtml(claim.linguist_proposal.rationale)}</span>
+    </div>` : '';
+  const needsValidation = claim.status === 'NEEDS_VALIDATION' || claim.status === 'CONFLICTED';
+  const validateHtml = needsValidation ? renderValidateBox(claim) : '';
+
+  el.innerHTML = `
+    <h3>"${escapeHtml(claim.value)}" <span class="badge ${claim.status}">${claim.status.replace('_', ' ')}</span></h3>
+    <div class="confidence">${escapeHtml(claim.segment_label || claim.source_id)}${pct != null ? ` &middot; confidence ${pct}%` : ''}${claim.recommended_action ? ` &middot; ${claim.recommended_action.replace('_', ' ')}` : ''}</div>
+    <ul class="evidence-list">${evidenceHtml || '<li>No evidence found yet.</li>'}</ul>
+    ${linguistHtml}
+    ${validateHtml}
+  `;
+  if (needsValidation) wireValidateBox(el, claim);
+}
+
+function renderValidateBox(claim) {
+  return `
+    <div class="validate-box">
+      <div style="margin-bottom:6px; font-size:13px;">Human knowledge required${claim.conflicts && claim.conflicts.length ? ' - conflicting sources found' : ''}.</div>
+      <input type="text" class="validate-value" placeholder="Correct value" value="${escapeHtml(claim.value)}" />
+      <input type="text" class="validate-name" placeholder="Your name" />
+      <input type="text" class="validate-role" placeholder="Role (e.g. community linguist)" />
+      <button class="validate-submit" type="button">Submit validation</button>
+    </div>
+  `;
+}
+
+function wireValidateBox(el, claim) {
+  const btn = el.querySelector('.validate-submit');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const value = el.querySelector('.validate-value').value.trim();
+    const name = el.querySelector('.validate-name').value.trim() || 'Anonymous validator';
+    const role = el.querySelector('.validate-role').value.trim() || 'community member';
+    if (!value) { alert('Enter a value.'); return; }
+    btn.disabled = true;
+    try {
+      const res = await fetch(`/api/jobs/${currentJob.job_id}/claims/${claim.claim_id}/validate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ validator_name: name, validator_role: role, decision_value: value }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const result = await res.json();
+      logEvent('complete', `Validated "${value}" - knowledge graph updated.`);
+      renderSummary(result.job);
+      const updated = result.job.claims.find(c => c.claim_id === claim.claim_id);
+      if (updated) upsertClaimCard(updated);
+    } catch (err) {
+      alert('Validation failed: ' + err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str == null ? '' : String(str);
+  return div.innerHTML;
+}
+</script>
+</body>
+</html>
