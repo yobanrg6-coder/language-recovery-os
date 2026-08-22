@@ -54,7 +54,7 @@ from agents.conflict_agent import create_conflict_agent
 from agents.evidence_agent import create_evidence_agent
 from agents.governance_agent import GovernanceBlockedError, can_send_to_model, require_sendable
 from agents.linguist_agent import create_linguist_agent
-from agents.retrieval import search_all
+from agents.retrieval import filter_verified_evidence, search_all
 from agents.schemas import (
     ArchiveAnalysis,
     Claim,
@@ -369,7 +369,15 @@ class RecoveryOrchestrator:
         except AgentExecutionError:
             logger.exception("EvidenceAgent failed for claim '%s'; continuing with no evidence", claim_value)
             return []
-        return result.evidence
+
+        verified_evidence = filter_verified_evidence(result.evidence, snippets)
+        if len(verified_evidence) != len(result.evidence):
+            dropped = {(e.source_id, e.locator) for e in result.evidence} - {(e.source_id, e.locator) for e in verified_evidence}
+            logger.warning(
+                "EvidenceAgent returned evidence for snippet(s) that were never retrieved %s on claim '%s' - dropped",
+                dropped, claim_value,
+            )
+        return verified_evidence
 
     async def _propose_meaning(self, claim_value: str, evidence: list[Evidence]) -> LinguistProposal | None:
         evidence_block = "\n".join(

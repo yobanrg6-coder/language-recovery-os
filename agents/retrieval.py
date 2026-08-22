@@ -17,6 +17,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from agents.schemas import Evidence
+
 MAX_SNIPPETS_PER_SOURCE = 4
 CONTEXT_LINES = 1
 _FUZZY_CUTOFF = 0.6
@@ -71,7 +73,32 @@ def search_all(query: str, searchable_sources: list[tuple[str, Path, str]]) -> l
     every non-audio, governance-cleared source in the job. Sequential and
     unindexed on purpose -- at demo scale (3-4 documents) this is a few
     hundred lines per source, not a corpus that needs a real index."""
+    if not query.strip():
+        # TranscriptionCandidate.text has no min_length (agents/schemas.py),
+        # so a segment Gemini couldn't transcribe (silence, noise, or a
+        # language/audio it can't parse) can legally produce an empty claim
+        # value. Without this guard, `"" in line` is True for every
+        # non-blank line in every source (found 2026-08-22 auditing a
+        # non-Mapudungun-shaped-audio scenario), flooding an empty claim
+        # with irrelevant "supporting" snippets instead of correctly
+        # reporting zero evidence.
+        return []
     results: list[RetrievedSnippet] = []
     for source_id, file_path, locator_prefix in searchable_sources:
         results.extend(search_source(source_id, file_path, query, locator_prefix))
     return results
+
+
+def filter_verified_evidence(evidence: list[Evidence], snippets: list[RetrievedSnippet]) -> list[Evidence]:
+    """Drops any Evidence entry whose (source_id, locator) doesn't match a
+    snippet this module actually retrieved and showed to EvidenceAgent.
+
+    EvidenceAgent's own instructions tell it to copy source_id/locator from
+    a given snippet verbatim (agents/evidence_agent.py, rule 4), but nothing
+    enforced that server-side before this - the model's structured output
+    was trusted as-is, so a hallucinated or misattributed (source_id,
+    locator) pair flowed straight into scoring.py unverified, silently
+    breaking the "no knowledge without provenance" guarantee. Found
+    2026-08-22 in a pre-submission audit."""
+    real_locators = {(s.source_id, s.locator) for s in snippets}
+    return [e for e in evidence if (e.source_id, e.locator) in real_locators]
