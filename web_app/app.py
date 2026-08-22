@@ -75,15 +75,23 @@ def _get_client_ip(request: Request) -> str:
 
 def _check_rate_limit(client_ip: str) -> None:
     now = time.monotonic()
+    # The 2026-08-19 fix only pruned the CALLING ip's own entry, so a
+    # one-time visitor's deque (the dominant traffic pattern on a public,
+    # unauthenticated hackathon demo link - most judges/crawlers hit it once
+    # and never come back) was never revisited and stayed in _request_log
+    # forever. Found 2026-08-22: sweep every tracked IP's expired entries on
+    # each call, not just the current one - O(distinct IPs seen), trivially
+    # cheap at demo traffic volumes.
+    stale_ips = []
+    for ip, log in _request_log.items():
+        while log and now - log[0] > RATE_LIMIT_WINDOW_SECONDS:
+            log.popleft()
+        if not log:
+            stale_ips.append(ip)
+    for ip in stale_ips:
+        del _request_log[ip]
+
     log = _request_log[client_ip]
-    while log and now - log[0] > RATE_LIMIT_WINDOW_SECONDS:
-        log.popleft()
-    if not log:
-        # Drop the now-empty deque instead of leaving a permanent dict entry
-        # per distinct client IP -- this dict is never cleared otherwise, so
-        # a long-running instance would grow it unbounded (found 2026-08-19).
-        del _request_log[client_ip]
-        log = _request_log[client_ip]
     if len(log) >= RATE_LIMIT_MAX_REQUESTS:
         raise HTTPException(
             status_code=429,

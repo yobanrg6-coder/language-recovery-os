@@ -101,6 +101,21 @@ _AUDIO_MIME_BY_EXT = {
 }
 
 
+def resolve_audio_mime_type(suffix: str) -> str:
+    """Raises instead of silently guessing audio/webm for an unrecognized
+    extension (found 2026-08-22 in a judge audit) - a mislabeled MIME type
+    can make Gemini silently misparse or reject the audio instead of the
+    caller getting a clear 'unsupported format' message. Module-level and
+    pure so it's unit-testable without an API key, same pattern as
+    agents/retrieval.py's helpers."""
+    mime_type = _AUDIO_MIME_BY_EXT.get(suffix.lower())
+    if mime_type is None:
+        raise ValueError(
+            f"Unsupported audio extension '{suffix}' - supported: {', '.join(sorted(_AUDIO_MIME_BY_EXT))}"
+        )
+    return mime_type
+
+
 def _strip_markdown_fence(text: str) -> str:
     stripped = text.strip()
     stripped = _FENCE_PREFIX_RE.sub("", stripped, count=1)
@@ -240,7 +255,7 @@ class RecoveryOrchestrator:
             audio_path = upload_dir / source.filename
             try:
                 transcription = await self._transcribe_audio(source, audio_path)
-            except (AgentExecutionError, FileNotFoundError) as exc:
+            except (AgentExecutionError, FileNotFoundError, ValueError) as exc:
                 logger.exception("Transcription failed for %s", source.filename)
                 yield {"type": "status", "agent": "TranscriptionAgent", "stage": 2, "job_id": job.job_id,
                        "message": f"Transcription failed for '{source.filename}': {exc}"}
@@ -340,7 +355,7 @@ class RecoveryOrchestrator:
     async def _transcribe_audio(self, source: Source, audio_path: Path) -> TranscriptionOutput:
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
-        mime_type = _AUDIO_MIME_BY_EXT.get(audio_path.suffix.lower(), "audio/webm")
+        mime_type = resolve_audio_mime_type(audio_path.suffix)
         audio_bytes = audio_path.read_bytes()
         transcription_agent = create_transcription_agent(model_name=self.model_name, api_key=self.api_key)
         prompt_text = (
