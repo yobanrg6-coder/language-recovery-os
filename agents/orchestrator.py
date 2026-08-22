@@ -298,6 +298,7 @@ class RecoveryOrchestrator:
                 claim.transcription_confidence,
                 evidence,
                 conflict_result.conflicts,
+                has_conflict=conflict_result.has_conflict,
             )
             scored_claims.append(scored)
             yield {"type": "agent_result", "agent": "ScoringEngine", "stage": 6, "job_id": job.job_id,

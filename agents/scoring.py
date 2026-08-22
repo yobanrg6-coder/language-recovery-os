@@ -62,13 +62,21 @@ def score_claim(
     evidence: list[Evidence],
     conflicts: list[ConflictNote],
     weights: ConfidenceWeights | None = None,
+    has_conflict: bool = False,
 ) -> Claim:
     weights = weights or ConfidenceWeights()
 
     transcription = transcription_confidence if transcription_confidence is not None else 0.0
     evidence_support = _evidence_support_avg(evidence)
     cross_source = _cross_source_agreement(evidence)
-    has_conflict = len(conflicts) > 0
+    # ConflictCheckOutput.has_conflict is a separate LLM-set bool from its
+    # own `conflicts` list (agents/schemas.py has no validator forcing them
+    # to agree) - trusting only len(conflicts) meant a model returning
+    # has_conflict=True with an empty conflicts list slipped straight past
+    # Rule 2 ("an unresolved conflict always routes to human validation").
+    # Found 2026-08-22; ORing both is the conservative fix - either signal
+    # saying "conflict" is enough to block auto-accept.
+    has_conflict = has_conflict or len(conflicts) > 0
 
     combined = (
         weights.transcription * transcription

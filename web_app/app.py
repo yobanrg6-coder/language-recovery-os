@@ -265,7 +265,24 @@ async def process_stream(job_id: str, request: Request, api_key: str | None = No
     resolved_key = api_key or os.getenv("GEMINI_API_KEY")
     upload_dir = UPLOAD_ROOT / job_id
 
+    # Re-running the pipeline rebuilds job.claims from scratch (see
+    # RecoveryOrchestrator.build_recovery_stream), which would silently wipe
+    # any COMMUNITY_VALIDATED claims a human already confirmed on a prior
+    # run - found 2026-08-22 auditing the "click Process Archive twice"
+    # path, which nothing else on the frontend prevents. A job that already
+    # ran to a real outcome (or is running right now) must be re-created as
+    # a new job to be re-processed, never silently reprocessed in place.
+    _ALREADY_PROCESSED_STATUSES = {JobStatus.RUNNING, JobStatus.WAITING_HUMAN, JobStatus.COMPLETED}
+
     async def event_generator():
+        if job.status in _ALREADY_PROCESSED_STATUSES:
+            message = (
+                f"This job already {'has results' if job.status != JobStatus.RUNNING else 'is being processed'} "
+                f"(status={job.status.value}). Re-processing in place would discard any human validations already "
+                "recorded on it - create a new job to run the pipeline again."
+            )
+            yield f"data: {json.dumps({'type': 'error', 'message': message}, ensure_ascii=False)}\n\n"
+            return
         if not resolved_key:
             yield f"data: {json.dumps({'type': 'error', 'message': 'Missing GEMINI_API_KEY: set it in .env or pass it as a query param.'}, ensure_ascii=False)}\n\n"
             return
@@ -307,6 +324,18 @@ async def validate_claim(job_id: str, claim_id: str, req: ValidationRequest, req
     claim_index = next((i for i, c in enumerate(job.claims) if c.claim_id == claim_id), None)
     if claim_index is None:
         raise HTTPException(status_code=404, detail="Claim not found")
+
+    current_status = job.claims[claim_index].status.value
+    if current_status not in ("NEEDS_VALIDATION", "CONFLICTED"):
+        # Without this, POSTing here on an already-SUPPORTED/HYPOTHESIS/
+        # COMMUNITY_VALIDATED claim silently overwrites its value and forces
+        # it to COMMUNITY_VALIDATED, bypassing the deterministic confidence
+        # engine entirely - found 2026-08-22, since job_id/claim_id are both
+        # visible in ordinary API responses and this endpoint has no auth.
+        raise HTTPException(
+            status_code=409,
+            detail=f"Claim is '{current_status}', not pending human validation - it cannot be re-validated.",
+        )
 
     updated_claim = job.claims[claim_index].model_copy(update={"value": req.decision_value})
     updated_claim = apply_community_validation(updated_claim)

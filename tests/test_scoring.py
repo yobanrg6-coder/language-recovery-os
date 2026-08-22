@@ -84,6 +84,24 @@ def test_conflict_forces_human_validation_even_with_high_score():
     assert scored.recommended_action == ACTION_HUMAN_VALIDATION
 
 
+def test_has_conflict_flag_alone_forces_human_validation():
+    # ConflictAgent's has_conflict bool and its conflicts list are two
+    # separate LLM-set fields with no schema validator forcing them to
+    # agree (agents/schemas.py::ConflictCheckOutput) - a model returning
+    # has_conflict=True with an empty conflicts list must still block
+    # auto-accept, not just len(conflicts) > 0. Regression test for the fix
+    # found 2026-08-22 auditing agents/scoring.py.
+    claim = _base_claim()
+    evidence = [
+        Evidence(source_id="dict_1", locator="L1", snippet="mari - diez", stance=EvidenceStance.SUPPORTS, support_score=0.95, rationale="exact match"),
+        Evidence(source_id="grammar_1", locator="L2", snippet="mari used as numeral", stance=EvidenceStance.SUPPORTS, support_score=0.9, rationale="grammar-consistent"),
+        Evidence(source_id="corpus_1", locator="L3", snippet="mari kechu", stance=EvidenceStance.SUPPORTS, support_score=0.9, rationale="corpus occurrence"),
+    ]
+    scored = score_claim(claim, transcription_confidence=0.95, evidence=evidence, conflicts=[], has_conflict=True)
+    assert scored.status == ClaimStatus.CONFLICTED
+    assert scored.recommended_action == ACTION_HUMAN_VALIDATION
+
+
 def test_validated_claim_updates_graph():
     claim = score_claim(_base_claim(), transcription_confidence=0.3, evidence=[], conflicts=[])
     assert claim.status == ClaimStatus.NEEDS_VALIDATION
