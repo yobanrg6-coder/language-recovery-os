@@ -38,6 +38,17 @@
     border-radius: 999px; padding: 6px 12px; margin: 0 8px 8px 0; font-size: 13px; }
   .source-chip .type { color: var(--muted); }
   .actions { display: flex; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+  .pipeline { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+  .pipeline-step { display: flex; align-items: center; gap: 7px; padding: 6px 13px; border-radius: 999px;
+    background: var(--fill); color: var(--muted); font-size: 12px; font-weight: 600; border: 1px solid var(--border);
+    transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease; }
+  .pipeline-step .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border); flex-shrink: 0; transition: background 0.2s ease; }
+  .pipeline-step.done { background: rgba(111,161,122,0.10); color: var(--accent2-strong); border-color: rgba(111,161,122,0.4); }
+  .pipeline-step.done .dot { background: var(--accent2); }
+  .pipeline-step.active { background: rgba(169,128,92,0.12); color: var(--accent-strong); border-color: var(--accent); }
+  .pipeline-step.active .dot { background: var(--accent); animation: pipeline-pulse 1.1s ease-in-out infinite; }
+  @keyframes pipeline-pulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.7); opacity: 0.5; } }
+  @media (prefers-reduced-motion: reduce) { .pipeline-step.active .dot { animation: none; } }
   #log { display: flex; flex-direction: column; gap: 8px; max-height: 340px; overflow-y: auto; }
   .event { border-left: 3px solid var(--border); padding: 6px 12px; font-size: 13px; }
   .event.status { color: var(--muted); border-left-color: var(--accent); }
@@ -107,6 +118,14 @@
 
     <section class="panel" id="agents-panel" style="display:none;">
       <h2>Agents</h2>
+      <div class="pipeline" id="pipeline">
+        <div class="pipeline-step" data-agent="ArchiveAgent"><span class="dot"></span>Archive</div>
+        <div class="pipeline-step" data-agent="TranscriptionAgent"><span class="dot"></span>Transcribe</div>
+        <div class="pipeline-step" data-agent="EvidenceAgent"><span class="dot"></span>Evidence</div>
+        <div class="pipeline-step" data-agent="LinguistAgent"><span class="dot"></span>Linguist</div>
+        <div class="pipeline-step" data-agent="ConflictAgent"><span class="dot"></span>Conflict</div>
+        <div class="pipeline-step" data-agent="ScoringEngine"><span class="dot"></span>Score</div>
+      </div>
       <div id="log"></div>
     </section>
 
@@ -228,6 +247,7 @@ $('process-btn').addEventListener('click', () => {
   $('log').innerHTML = '';
   $('claims').innerHTML = '';
   $('knowledge-panel').style.display = 'block';
+  resetPipeline();
 
   const url = `/api/jobs/${currentJob.job_id}/process-stream` + (API_KEY_PARAM ? `?api_key=${encodeURIComponent(API_KEY_PARAM)}` : '');
   const source = new EventSource(url);
@@ -250,18 +270,51 @@ $('process-btn').addEventListener('click', () => {
 function handleEvent(data) {
   if (data.type === 'status') {
     logEvent('status', `[${data.agent}] ${data.message}`);
+    setPipelineActive(data.agent);
   } else if (data.type === 'error') {
     logEvent('error', data.message);
   } else if (data.type === 'agent_result') {
     logEvent('status', `[${data.agent}] result received`);
+    setPipelineDone(data.agent);
     if (data.agent === 'ScoringEngine' && data.data && data.data.claim_id) {
       upsertClaimCard(data.data);
     }
   } else if (data.type === 'complete') {
     logEvent('complete', data.message);
+    finishPipeline();
     renderSummary(data.data);
     for (const claim of data.data.claims) upsertClaimCard(claim);
   }
+}
+
+// --- Agent pipeline chips ------------------------------------------------
+
+function resetPipeline() {
+  document.querySelectorAll('.pipeline-step').forEach((el) => el.classList.remove('active', 'done'));
+}
+
+function setPipelineActive(agentName) {
+  document.querySelectorAll('.pipeline-step').forEach((el) => {
+    if (el.dataset.agent === agentName) {
+      el.classList.add('active');
+      el.classList.remove('done');
+    } else if (el.classList.contains('active')) {
+      el.classList.remove('active');
+      el.classList.add('done');
+    }
+  });
+}
+
+function setPipelineDone(agentName) {
+  const el = document.querySelector(`.pipeline-step[data-agent="${agentName}"]`);
+  if (el) { el.classList.remove('active'); el.classList.add('done'); }
+}
+
+function finishPipeline() {
+  document.querySelectorAll('.pipeline-step.active').forEach((el) => {
+    el.classList.remove('active');
+    el.classList.add('done');
+  });
 }
 
 // --- Knowledge / claim cards --------------------------------------------
