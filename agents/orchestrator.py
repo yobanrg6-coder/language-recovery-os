@@ -16,8 +16,13 @@ scope from BITACORA_PROYECTO.md already applied):
    strength.
 4. LinguistAgent proposes a meaning/lemma/morphemes hypothesis grounded in
    the judged evidence.
-5. ConflictAgent checks the judged evidence and any variants LinguistAgent
-   noticed for genuine contradictions.
+5. ConflictAgent (Gemini) and GemmaConflictAgent (Gemma) independently check
+   the judged evidence and any variants LinguistAgent noticed for genuine
+   contradictions, in parallel -- two different model families asked the
+   identical question, so a real conflict either one raises is never
+   silently dropped (agents/scoring.py::merge_conflict_checks), same
+   discipline as the sibling projects (Trusted Hire Mexico's
+   GemmaVerifierAgent, ScopeCouncil's GemmaScopeAgent).
 6. Python (agents/scoring.py) combines every signal above into a final
    confidence and status -- ACCEPT / hypothesis / human validation -- never
    the LLM. GovernanceAgent (agents/governance_agent.py) gates every model
@@ -52,6 +57,7 @@ from google.genai import types
 from agents.archive_agent import create_archive_agent, create_transcription_agent
 from agents.conflict_agent import create_conflict_agent
 from agents.evidence_agent import create_evidence_agent
+from agents.gemma_conflict_agent import create_gemma_conflict_agent
 from agents.governance_agent import GovernanceBlockedError, can_send_to_model, require_sendable
 from agents.linguist_agent import create_linguist_agent
 from agents.retrieval import filter_verified_evidence, search_all
@@ -70,7 +76,7 @@ from agents.schemas import (
     SourceType,
     TranscriptionOutput,
 )
-from agents.scoring import score_claim
+from agents.scoring import merge_conflict_checks, score_claim
 from store import job_store
 
 load_dotenv()
@@ -85,6 +91,13 @@ AGENT_CALL_TIMEOUT_SECONDS = 35.0
 # (a heavier generation task needs more budget than a plain-text call, found
 # live 18-ago on that sibling project), this stage gets a longer allowance.
 TRANSCRIPTION_CALL_TIMEOUT_SECONDS = 70.0
+# GemmaConflictAgent is a secondary, optional second opinion (see
+# _check_conflict_gemma_or_degrade) - it already degrades to "no additional
+# conflicts from Gemma" on failure, so it gets a tighter budget than the
+# primary Gemini call rather than sharing AGENT_CALL_TIMEOUT_SECONDS's full
+# retry cost. Same reasoning as the sibling projects (Trusted Hire Mexico,
+# ScopeCouncil).
+GEMMA_CALL_TIMEOUT_SECONDS = 20.0
 APP_NAME = "languagerecoveryos"
 
 MAX_EXCERPT_CHARS = 6000
@@ -301,7 +314,24 @@ class RecoveryOrchestrator:
 
             yield {"type": "status", "agent": "ConflictAgent", "stage": 5, "job_id": job.job_id,
                    "message": f"Checking '{claim.value}' for cross-source conflicts..."}
-            conflict_result = await self._check_conflict(claim.value, evidence, linguist_proposal)
+            yield {"type": "status", "agent": "GemmaConflictAgent", "stage": 5, "job_id": job.job_id,
+                   "message": f"Independently re-checking '{claim.value}' on a different model family (Gemma)..."}
+
+            gemini_conflict, gemma_conflict = await asyncio.gather(
+                self._check_conflict(claim.value, evidence, linguist_proposal),
+                self._check_conflict_gemma_or_degrade(claim.value, evidence, linguist_proposal),
+            )
+            if gemma_conflict is not None and gemma_conflict.conflicts:
+                yield {"type": "agent_result", "agent": "GemmaConflictAgent", "stage": 5, "job_id": job.job_id,
+                       "data": {"claim_id": claim.claim_id, **gemma_conflict.model_dump()}}
+            elif gemma_conflict is None:
+                yield {"type": "status", "agent": "GemmaConflictAgent", "stage": 5, "job_id": job.job_id,
+                       "message": "Gemma check unavailable this run - continuing with Gemini's read alone."}
+
+            # Union, not intersection: a conflict either model raises is kept
+            # (agents/scoring.py::merge_conflict_checks) -- a false negative
+            # here is worse than an extra claim routed to human validation.
+            conflict_result = merge_conflict_checks(gemini_conflict, gemma_conflict)
             if conflict_result.conflicts:
                 yield {"type": "agent_result", "agent": "ConflictAgent", "stage": 5, "job_id": job.job_id,
                        "data": {"claim_id": claim.claim_id, **conflict_result.model_dump()}}
@@ -407,17 +437,37 @@ class RecoveryOrchestrator:
             logger.exception("LinguistAgent failed for claim '%s'", claim_value)
             return None
 
-    async def _check_conflict(
-        self, claim_value: str, evidence: list[Evidence], linguist_proposal: LinguistProposal | None
-    ) -> ConflictCheckOutput:
+    def _build_conflict_prompt(self, claim_value: str, evidence: list[Evidence], linguist_proposal: LinguistProposal | None) -> str:
         evidence_block = "\n".join(
             f"- [{e.stance.value}] {e.source_id}: {e.snippet}" for e in evidence
         ) or "(no evidence found)"
         variants = ", ".join(linguist_proposal.variants) if linguist_proposal and linguist_proposal.variants else "(none noted)"
+        return f"Claim value: {claim_value}\n\nJudged evidence:\n{evidence_block}\n\nVariants noted by Linguist Agent: {variants}"
+
+    async def _check_conflict(
+        self, claim_value: str, evidence: list[Evidence], linguist_proposal: LinguistProposal | None
+    ) -> ConflictCheckOutput:
         conflict_agent = create_conflict_agent(model_name=self.model_name, api_key=self.api_key)
-        prompt = f"Claim value: {claim_value}\n\nJudged evidence:\n{evidence_block}\n\nVariants noted by Linguist Agent: {variants}"
+        prompt = self._build_conflict_prompt(claim_value, evidence, linguist_proposal)
         try:
             return await self._run_text_agent(conflict_agent, prompt, ConflictCheckOutput, "ConflictAgent")
         except AgentExecutionError:
             logger.exception("ConflictAgent failed for claim '%s'; assuming no conflict", claim_value)
             return ConflictCheckOutput(has_conflict=False, conflicts=[], resolution_note=None)
+
+    async def _check_conflict_gemma_or_degrade(
+        self, claim_value: str, evidence: list[Evidence], linguist_proposal: LinguistProposal | None
+    ) -> ConflictCheckOutput | None:
+        # Secondary, optional second opinion (see agents/gemma_conflict_agent.py) -
+        # degrades to None (treated as "no additional conflicts from Gemma")
+        # on any failure, so it never blocks the primary Gemini read, same
+        # discipline as the sibling projects' Gemma calls.
+        gemma_agent = create_gemma_conflict_agent(api_key=self.api_key)
+        prompt = self._build_conflict_prompt(claim_value, evidence, linguist_proposal)
+        try:
+            return await self._run_text_agent(
+                gemma_agent, prompt, ConflictCheckOutput, "GemmaConflictAgent", timeout_seconds=GEMMA_CALL_TIMEOUT_SECONDS
+            )
+        except AgentExecutionError:
+            logger.exception("GemmaConflictAgent failed for claim '%s'; continuing with Gemini's read alone", claim_value)
+            return None

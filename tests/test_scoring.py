@@ -10,12 +10,13 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from agents.schemas import Claim, ClaimStatus, ClaimType, ConflictNote, Evidence, EvidenceStance
+from agents.schemas import Claim, ClaimStatus, ClaimType, ConflictCheckOutput, ConflictNote, Evidence, EvidenceStance
 from agents.scoring import (
     ACTION_AUTO_ACCEPT,
     ACTION_HUMAN_VALIDATION,
     ACTION_KEEP_HYPOTHESIS,
     apply_community_validation,
+    merge_conflict_checks,
     score_claim,
 )
 
@@ -100,6 +101,46 @@ def test_has_conflict_flag_alone_forces_human_validation():
     scored = score_claim(claim, transcription_confidence=0.95, evidence=evidence, conflicts=[], has_conflict=True)
     assert scored.status == ClaimStatus.CONFLICTED
     assert scored.recommended_action == ACTION_HUMAN_VALIDATION
+
+
+def test_merge_conflict_checks_falls_back_to_primary_when_gemma_unavailable():
+    primary = ConflictCheckOutput(
+        has_conflict=True,
+        conflicts=[ConflictNote(source_id="corpus_2019", alternative_value="mary", likely_cause="orthographic reform")],
+        resolution_note="Check the 2019 corpus entry against the 1916 dictionary.",
+    )
+    merged = merge_conflict_checks(primary, None)
+    assert merged is primary
+
+
+def test_merge_conflict_checks_unions_conflicts_gemma_alone_found():
+    # A real conflict Gemini's read missed entirely still has to surface -
+    # union, not intersection, same principle as merge_scam_flags in the
+    # sibling project Trusted Hire Mexico.
+    primary = ConflictCheckOutput(has_conflict=False, conflicts=[], resolution_note=None)
+    secondary = ConflictCheckOutput(
+        has_conflict=True,
+        conflicts=[ConflictNote(source_id="grammar_1903", alternative_value="pewelafin", likely_cause="regional variant")],
+        resolution_note="Compare against the Augusta grammar's regional notes.",
+    )
+    merged = merge_conflict_checks(primary, secondary)
+    assert merged.has_conflict is True
+    assert len(merged.conflicts) == 1
+    assert merged.conflicts[0].source_id == "grammar_1903"
+    assert merged.resolution_note == secondary.resolution_note
+
+
+def test_merge_conflict_checks_dedupes_identical_conflicts():
+    note = ConflictNote(source_id="corpus_2019", alternative_value="mary", likely_cause="orthographic reform")
+    primary = ConflictCheckOutput(has_conflict=True, conflicts=[note], resolution_note="Check the corpus.")
+    secondary = ConflictCheckOutput(
+        has_conflict=True,
+        conflicts=[ConflictNote(source_id="corpus_2019", alternative_value="mary", likely_cause="regional variant")],
+        resolution_note="Check the corpus.",
+    )
+    merged = merge_conflict_checks(primary, secondary)
+    assert len(merged.conflicts) == 1
+    assert merged.resolution_note == "Check the corpus."
 
 
 def test_validated_claim_updates_graph():

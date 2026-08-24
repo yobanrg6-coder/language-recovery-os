@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from agents.schemas import Claim, ClaimStatus, ConflictNote, Evidence, EvidenceStance
+from agents.schemas import Claim, ClaimStatus, ConflictCheckOutput, ConflictNote, Evidence, EvidenceStance
 
 ACTION_AUTO_ACCEPT = "auto_accept"
 ACTION_KEEP_HYPOTHESIS = "keep_as_hypothesis"
@@ -124,6 +124,43 @@ def score_claim(
             },
         }
     )
+
+
+def merge_conflict_checks(
+    primary: ConflictCheckOutput, secondary: "ConflictCheckOutput | None"
+) -> ConflictCheckOutput:
+    """
+    Combines the Conflict Agent's (Gemini) and Gemma Conflict Agent's (Gemma)
+    independent reads of the same judged evidence into one attributed
+    result -- same "union, not intersection" principle as Trusted Hire
+    Mexico's merge_scam_flags: a conflict either model raises is kept, never
+    silently dropped, because a false negative here is worse than an extra
+    claim routed to human validation. has_conflict is the OR of both models'
+    own flags and of whether either produced any ConflictNote, matching the
+    same defensive OR already applied in score_claim() against a single
+    model disagreeing with its own conflicts list.
+
+    Falls back to the primary's read alone when Gemma is unavailable (see
+    orchestrator.py's degrade-safe Gemma call).
+    """
+    if secondary is None:
+        return primary
+
+    merged_conflicts: list[ConflictNote] = list(primary.conflicts)
+    seen = {(c.source_id, c.alternative_value) for c in merged_conflicts}
+    for note in secondary.conflicts:
+        key = (note.source_id, note.alternative_value)
+        if key not in seen:
+            merged_conflicts.append(note)
+            seen.add(key)
+
+    has_conflict = primary.has_conflict or secondary.has_conflict or bool(merged_conflicts)
+
+    resolution_note = primary.resolution_note or secondary.resolution_note
+    if primary.resolution_note and secondary.resolution_note and primary.resolution_note != secondary.resolution_note:
+        resolution_note = f"{primary.resolution_note} (Gemini) / {secondary.resolution_note} (Gemma)"
+
+    return ConflictCheckOutput(has_conflict=has_conflict, conflicts=merged_conflicts, resolution_note=resolution_note)
 
 
 def apply_community_validation(claim: Claim) -> Claim:

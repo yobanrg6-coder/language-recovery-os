@@ -1,7 +1,7 @@
 # Language Recovery OS: Turn Fragmented Language Archives Into Living, Validated Knowledge
 
 [![Google ADK](https://img.shields.io/badge/Framework-Google%20ADK-4285F4?logo=google&logoColor=white)](https://github.com/google/adk)
-[![Model](https://img.shields.io/badge/LLM-Gemini-34A853?logo=google-gemini&logoColor=white)](https://aistudio.google.com/)
+[![Model](https://img.shields.io/badge/LLM-Gemini%20%2B%20Gemma-34A853?logo=google-gemini&logoColor=white)](https://aistudio.google.com/)
 [![Cloud](https://img.shields.io/badge/Deployment-Google%20Cloud%20Run-FBBC05?logo=google-cloud&logoColor=white)](https://cloud.google.com/run)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -36,9 +36,12 @@ flowchart TD
     Transcribe -->|"per transcribed claim"| Retrieval["agents/retrieval.py\n(plain Python keyword search over\nthe archive's own text sources)"]
     Retrieval --> Evidence["3. 🔍 EvidenceAgent\n(judges stance: supports /\ncontradicts / related)"]
     Evidence --> Linguist["4. 📖 LinguistAgent\n(meaning/lemma hypothesis,\ngrounded in judged evidence)"]
-    Linguist --> Conflict["5. ⚠️ ConflictAgent\n(cross-source contradiction check)"]
+    Linguist --> Conflict["5. ⚠️ ConflictAgent (Gemini)\ncross-source contradiction check"]
+    Linguist -->|"asyncio.gather - run in parallel"| Conflict2["5b. 🔁 GemmaConflictAgent\nsame instruction/schema, different model: Gemma"]
+    Conflict --> Merge["agents/scoring.py::merge_conflict_checks\nunion, not intersection"]
+    Conflict2 --> Merge
 
-    Conflict --> Scoring["6. 🧮 Deterministic Confidence Engine\n(agents/scoring.py — pure Python,\nnever the LLM)"]
+    Merge --> Scoring["6. 🧮 Deterministic Confidence Engine\n(agents/scoring.py — pure Python,\nnever the LLM)"]
     Scoring -->|"≥0.85 & has evidence"| Accept["✅ SUPPORTED (auto-accepted)"]
     Scoring -->|"0.65–0.84"| Hypothesis["🟡 HYPOTHESIS"]
     Scoring -->|"no evidence, low score,\nor unresolved conflict"| Human["🙋 NEEDS_VALIDATION / CONFLICTED\n(routed to a human)"]
@@ -68,6 +71,7 @@ flowchart TD
 | **EvidenceAgent** | Given candidate snippets found by a plain-Python keyword search over the archive's dictionary/grammar/corpus, judges each one's stance (`supports` / `contradicts` / `related`) and support strength. |
 | **LinguistAgent** | Proposes a meaning/lemma/morpheme hypothesis grounded only in the judged evidence — always framed as a hypothesis, never asserted as fact. |
 | **ConflictAgent** | Checks the judged evidence and any variants for genuine cross-source contradictions (e.g. a 1974 dictionary entry vs. a 2019 community recording). |
+| **GemmaConflictAgent** | **Independent second opinion on Gemma** (a genuinely different model family, run concurrently with the Conflict Agent via `asyncio.gather`): re-checks the exact same evidence/variants with the identical instruction/schema. A real conflict either model raises is kept, never silently dropped — `agents/scoring.py::merge_conflict_checks` unions both reads, because a false negative here is worse than an extra claim routed to human validation. Directly reinforces section 7.7 of the master spec ("a claim with an unresolved conflict always routes to human validation"). Degrades to Gemini's read alone if Gemma is unavailable. |
 | **Deterministic Confidence Engine** (`agents/scoring.py`) | Combines transcription confidence (35%), evidence support (35%) and cross-source agreement (30%), applies a conflict penalty, and maps the result to `SUPPORTED` / `HYPOTHESIS` / `NEEDS_VALIDATION` / `CONFLICTED` — pure Python, the only place a claim's status is ever decided. |
 
 All LLM-backed agents run as real `google.adk` `LlmAgent`s through an `InMemoryRunner`, with retry + timeout handling (`agents/orchestrator.py::_run_agent`) so a stalled Gemini call can never hang a Cloud Run request indefinitely.
