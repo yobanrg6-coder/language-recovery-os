@@ -188,34 +188,38 @@ async def create_job(
     upload_dir.mkdir(parents=True, exist_ok=True)
 
     sources: list[Source] = []
-    for i, (entry, upload) in enumerate(zip(entries, files, strict=True)):
-        try:
-            source_type = SourceType(entry["source_type"])
-            access_level = AccessLevel(entry.get("access_level", "PUBLIC"))
-        except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=f"manifest entry {i} invalid: {exc}") from exc
+    try:
+        for i, (entry, upload) in enumerate(zip(entries, files, strict=True)):
+            try:
+                source_type = SourceType(entry["source_type"])
+                access_level = AccessLevel(entry.get("access_level", "PUBLIC"))
+            except (KeyError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=f"manifest entry {i} invalid: {exc}") from exc
 
-        safe_name = _safe_filename(upload.filename or f"source_{i}")
-        dest_path = upload_dir / safe_name
-        size = 0
-        async with aiofiles.open(dest_path, "wb") as out:
-            while chunk := await upload.read(1024 * 1024):
-                size += len(chunk)
-                if size > MAX_UPLOAD_BYTES:
-                    await out.close()
-                    dest_path.unlink(missing_ok=True)
-                    raise HTTPException(status_code=413, detail=f"File '{safe_name}' exceeds the {MAX_UPLOAD_BYTES // (1024*1024)}MB limit")
-                await out.write(chunk)
+            safe_name = f"{i}_{_safe_filename(upload.filename or f'source_{i}')}"
+            dest_path = upload_dir / safe_name
+            size = 0
+            async with aiofiles.open(dest_path, "wb") as out:
+                while chunk := await upload.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > MAX_UPLOAD_BYTES:
+                        await out.close()
+                        dest_path.unlink(missing_ok=True)
+                        raise HTTPException(status_code=413, detail=f"File '{safe_name}' exceeds the {MAX_UPLOAD_BYTES // (1024*1024)}MB limit")
+                    await out.write(chunk)
 
-        sources.append(
-            Source(
-                source_id=f"src_{i}_{uuid.uuid4().hex[:8]}",
-                filename=safe_name,
-                source_type=source_type,
-                access_level=access_level,
-                citation=entry.get("citation"),
+            sources.append(
+                Source(
+                    source_id=f"src_{i}_{uuid.uuid4().hex[:8]}",
+                    filename=safe_name,
+                    source_type=source_type,
+                    access_level=access_level,
+                    citation=entry.get("citation"),
+                )
             )
-        )
+    except Exception:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        raise
 
     job = Job(
         job_id=job_id, name=job_name, status=JobStatus.QUEUED, sources=sources,
@@ -294,6 +298,10 @@ async def process_stream(job_id: str, request: Request, api_key: str | None = No
         if not resolved_key:
             yield f"data: {json.dumps({'type': 'error', 'message': 'Missing GEMINI_API_KEY: set it in .env or pass it as a query param.'}, ensure_ascii=False)}\n\n"
             return
+
+        running_job = job.model_copy(update={"status": JobStatus.RUNNING})
+        job_store.save_job(job_store.DEFAULT_DB_PATH, running_job)
+
         try:
             orchestrator = RecoveryOrchestrator(api_key=resolved_key)
         except Exception:
