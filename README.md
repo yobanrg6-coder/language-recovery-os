@@ -128,12 +128,13 @@ gcloud run deploy language-recovery-os --source . --region=us-central1
 # Secret Manager once, then reference it by name on deploy:
 echo -n "your_actual_gemini_api_key" | gcloud secrets create gemini-api-key --data-file=-
 gcloud run deploy language-recovery-os --source . --region=us-central1 \
-    --allow-unauthenticated --max-instances=1 \
+    --allow-unauthenticated --min-instances=1 --max-instances=1 \
     --set-env-vars WEB_APP_HOST=0.0.0.0,MODEL=gemini-flash-lite-latest \
     --set-secrets GEMINI_API_KEY=gemini-api-key:latest
 ```
 
-`minScale` is left at its default of `0`: the service scales to zero and costs nothing when idle, at the cost of a few seconds of cold start on the first request after inactivity.
+`--min-instances=1` keeps a warm instance running so judges never hit a cold-start abort
+(`"no available instance"` 500) on the first request after idle.
 
 ---
 
