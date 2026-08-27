@@ -65,7 +65,7 @@ Instructions:
 
 
 def create_archive_agent(model_name: str | None = None, api_key: str | None = None) -> LlmAgent:
-    model = model_name or os.getenv("MODEL", "gemini-flash-lite-latest")
+    model = model_name or os.getenv("MODEL", "gemini-3.5-flash-lite")
     gemini_kwargs: dict = {"model": model}
     if api_key:
         gemini_kwargs["client_kwargs"] = {"api_key": api_key}
@@ -79,7 +79,7 @@ def create_archive_agent(model_name: str | None = None, api_key: str | None = No
 
 
 def create_transcription_agent(model_name: str | None = None, api_key: str | None = None) -> LlmAgent:
-    model = model_name or os.getenv("MODEL", "gemini-flash-lite-latest")
+    model = model_name or os.getenv("MODEL", "gemini-3.5-flash-lite")
     gemini_kwargs: dict = {"model": model}
     if api_key:
         gemini_kwargs["client_kwargs"] = {"api_key": api_key}

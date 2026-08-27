@@ -1,7 +1,7 @@
 # Language Recovery OS: Turn Fragmented Language Archives Into Living, Validated Knowledge
 
 [![Google ADK](https://img.shields.io/badge/Framework-Google%20ADK-4285F4?logo=google&logoColor=white)](https://github.com/google/adk)
-[![Model](https://img.shields.io/badge/LLM-Gemini%20%2B%20Gemma-34A853?logo=google-gemini&logoColor=white)](https://aistudio.google.com/)
+[![Model](https://img.shields.io/badge/LLM-Gemini%203.5%20%2B%20Gemma-34A853?logo=google-gemini&logoColor=white)](https://aistudio.google.com/)
 [![Cloud](https://img.shields.io/badge/Deployment-Google%20Cloud%20Run-FBBC05?logo=google-cloud&logoColor=white)](https://cloud.google.com/run)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -98,9 +98,9 @@ cp .env.example .env
 Edit `.env` and set your key:
 ```env
 GEMINI_API_KEY=your_actual_gemini_api_key
-MODEL=gemini-flash-lite-latest
+MODEL=gemini-3.5-flash-lite
 ```
-`gemini-flash-lite-latest` is the default because it's the current stable multimodal-capable alias — pinned model names get retired from new accounts without notice, the `-latest` alias always resolves to Google's current recommended model.
+`gemini-3.5-flash-lite` is pinned to an explicit id to satisfy the hackathon's "Gemini 3.5 or newer" requirement; it is multimodal-capable (needed for the Transcription stage). `gemini-3.6-flash` is a drop-in upgrade if you want more capability.
 
 ### 3. Run the App
 ```bash
@@ -129,7 +129,7 @@ gcloud run deploy language-recovery-os --source . --region=us-central1
 echo -n "your_actual_gemini_api_key" | gcloud secrets create gemini-api-key --data-file=-
 gcloud run deploy language-recovery-os --source . --region=us-central1 \
     --allow-unauthenticated --min-instances=1 --max-instances=1 --timeout=900 \
-    --set-env-vars WEB_APP_HOST=0.0.0.0,MODEL=gemini-flash-lite-latest \
+    --set-env-vars WEB_APP_HOST=0.0.0.0,MODEL=gemini-3.5-flash-lite \
     --set-secrets GEMINI_API_KEY=gemini-api-key:latest
 ```
 

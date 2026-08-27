@@ -151,7 +151,7 @@ class RecoveryOrchestrator:
         # Not written to os.environ - built fresh per HTTP request in an
         # async server handling concurrent requests, same reasoning as the
         # sibling projects' orchestrators.
-        self.model_name = model or os.getenv("MODEL", "gemini-flash-lite-latest")
+        self.model_name = model or os.getenv("MODEL", "gemini-3.5-flash-lite")
         self.db_path = db_path or job_store.DEFAULT_DB_PATH
 
     async def _run_agent(

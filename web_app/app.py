@@ -152,7 +152,7 @@ async def serve_dashboard():
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "online", "service": "Language Recovery OS", "model": os.getenv("MODEL", "gemini-flash-lite-latest")}
+    return {"status": "online", "service": "Language Recovery OS", "model": os.getenv("MODEL", "gemini-3.5-flash-lite")}
 
 
 @app.get("/api/jobs/recent")
