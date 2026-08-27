@@ -42,7 +42,6 @@ import re
 import sys
 import uuid
 from collections.abc import AsyncGenerator
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
 

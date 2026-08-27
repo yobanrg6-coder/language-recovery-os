@@ -35,6 +35,18 @@ def test_nonempty_query_still_finds_matches(tmp_path):
     assert "river" in results[0].snippet.lower()
 
 
+def test_phrase_query_matches_despite_trailing_punctuation(tmp_path):
+    """2026-08-26 audit B1: a transcription like 'the river flows quietly.'
+    (trailing period, no closing words) must still hit the corpus line even
+    though it is not an exact substring of it."""
+    source = _write(tmp_path, "corpus.txt", "elder says the river flows quietly through the old stone village\n")
+    hits = search_all("the river flows quietly.", [("src_1", source, "src_1")])
+    assert len(hits) == 1
+
+    # a phrase with no real overlap still does not match
+    assert search_all("the cat sat on the mat", [("src_1", source, "src_1")]) == []
+
+
 def test_filter_verified_evidence_keeps_only_real_snippets():
     snippets = [
         RetrievedSnippet(source_id="src_1", locator="src_1#L1", snippet="river flows to the sea"),
@@ -57,3 +69,31 @@ def test_filter_verified_evidence_empty_snippets_drops_everything():
         stance=EvidenceStance.SUPPORTS, support_score=0.9, rationale="fabricated",
     )
     assert filter_verified_evidence([hallucinated], []) == []
+
+
+def test_filter_verified_evidence_tolerates_reformatted_locator():
+    """2026-08-26 audit M5: a model that copies the snippet faithfully but
+    reformats the locator must not have its evidence silently discarded and
+    reported as 'no evidence found'."""
+    snippets = [
+        RetrievedSnippet(source_id="src_1", locator="src_1#L14", snippet="ko means water in this passage"),
+    ]
+    reformatted = Evidence(
+        source_id="src_1", locator="src_1 : line 14", snippet="ko means water in this passage",
+        stance=EvidenceStance.SUPPORTS, support_score=0.9, rationale="same snippet, different locator style",
+    )
+    assert filter_verified_evidence([reformatted], snippets) == [reformatted]
+
+
+def test_filter_verified_evidence_still_rejects_wrong_source():
+    """The source_id boundary is not relaxed: evidence citing a source that
+    was never retrieved (e.g. a governance-blocked one) is always dropped,
+    even if some other source's snippet text happens to overlap."""
+    snippets = [
+        RetrievedSnippet(source_id="src_public", locator="src_public#L1", snippet="ko means water in this passage"),
+    ]
+    wrong_source = Evidence(
+        source_id="src_sacred", locator="src_sacred#L1", snippet="ko means water in this passage",
+        stance=EvidenceStance.SUPPORTS, support_score=0.9, rationale="cites a source that was never searched",
+    )
+    assert filter_verified_evidence([wrong_source], snippets) == []

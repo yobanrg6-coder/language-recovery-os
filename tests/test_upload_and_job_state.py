@@ -16,6 +16,7 @@ Isolated from the real data/jobs.db and data/uploads by monkeypatching
 job_store.DEFAULT_DB_PATH and app.UPLOAD_ROOT to a pytest tmp_path.
 """
 
+import asyncio
 import io
 import json
 import sys
@@ -26,9 +27,27 @@ from fastapi.testclient import TestClient
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from agents.schemas import JobStatus
+from agents.schemas import Claim, ClaimStatus, ClaimType, Job, JobStatus
 from store import job_store
 from web_app import app as app_module
+
+
+def _job_with_pending_claims(db_path, *claim_ids):
+    job = Job(
+        job_id="job-" + "-".join(claim_ids),
+        name="test",
+        status=JobStatus.WAITING_HUMAN,
+        claims=[
+            Claim(
+                claim_id=cid, job_id="j", claim_type=ClaimType.TRANSCRIPTION,
+                source_id="s", value=f"value-{cid}", status=ClaimStatus.NEEDS_VALIDATION,
+            )
+            for cid in claim_ids
+        ],
+        created_at="2026-08-26T00:00:00+00:00",
+    )
+    job_store.save_job(db_path, job)
+    return job
 
 
 @pytest.fixture
@@ -110,6 +129,35 @@ class _FakeOrchestrator:
         yield {"type": "status_seen_at_pipeline_start", "status": persisted.status.value}
 
 
+def test_try_claim_job_is_a_one_shot_gate(client):
+    """2026-08-26 audit M1: only the first claimer flips the job to RUNNING;
+    a concurrent second claim (double click / EventSource reconnect) gets
+    None instead of racing a second pipeline run."""
+    manifest = _manifest([{"source_type": "text", "access_level": "PUBLIC"}])
+    job_id = client.post(
+        "/api/jobs",
+        data={"manifest": manifest},
+        files=[("files", ("note.txt", io.BytesIO(b"hello"), "text/plain"))],
+    ).json()["job_id"]
+
+    first = job_store.try_claim_job(job_store.DEFAULT_DB_PATH, job_id)
+    assert first is not None and first.status == JobStatus.RUNNING
+
+    second = job_store.try_claim_job(job_store.DEFAULT_DB_PATH, job_id)
+    assert second is None, "a RUNNING job must not be claimable again"
+
+    # unknown id is also unclaimable, not an error
+    assert job_store.try_claim_job(job_store.DEFAULT_DB_PATH, "does-not-exist") is None
+
+    # a FAILED job IS retryable
+    job_store.save_job(
+        job_store.DEFAULT_DB_PATH,
+        first.model_copy(update={"status": JobStatus.FAILED}),
+    )
+    retried = job_store.try_claim_job(job_store.DEFAULT_DB_PATH, job_id)
+    assert retried is not None and retried.status == JobStatus.RUNNING
+
+
 def test_process_stream_persists_running_before_pipeline_starts(client, monkeypatch):
     manifest = _manifest([{"source_type": "text", "access_level": "PUBLIC"}])
     create_response = client.post(
@@ -132,6 +180,105 @@ def test_process_stream_persists_running_before_pipeline_starts(client, monkeypa
 
     final_job = job_store.get_job(job_store.DEFAULT_DB_PATH, job_id)
     assert final_job.status == JobStatus.RUNNING
+
+
+class _CancellingOrchestrator:
+    """Yields one event, then raises CancelledError - simulating the client
+    disconnecting (tab closed / EventSource dropped) or Cloud Run hitting its
+    request deadline while the pipeline streams."""
+
+    def __init__(self, api_key=None):
+        self.api_key = api_key
+
+    async def build_recovery_stream(self, job, upload_dir):
+        yield {"type": "status", "message": "started"}
+        raise asyncio.CancelledError()
+
+
+def test_cancelled_stream_marks_job_failed_and_leaves_it_retryable(client, monkeypatch):
+    """2026-08-26 audit A2: CancelledError is a BaseException, so the generic
+    `except Exception` never persisted FAILED and the job stayed stuck at
+    RUNNING - which _ALREADY_PROCESSED_STATUSES then blocks forever."""
+    manifest = _manifest([{"source_type": "text", "access_level": "PUBLIC"}])
+    create_response = client.post(
+        "/api/jobs",
+        data={"manifest": manifest},
+        files=[("files", ("note.txt", io.BytesIO(b"hello"), "text/plain"))],
+    )
+    job_id = create_response.json()["job_id"]
+
+    monkeypatch.setattr(app_module, "RecoveryOrchestrator", _CancellingOrchestrator)
+
+    try:
+        with client.stream("GET", f"/api/jobs/{job_id}/process-stream", params={"api_key": "fake-key"}) as response:
+            for _ in response.iter_lines():
+                pass
+    except Exception:
+        pass  # the re-raised CancelledError may surface through the test transport
+
+    failed_job = job_store.get_job(job_store.DEFAULT_DB_PATH, job_id)
+    assert failed_job.status == JobStatus.FAILED
+
+    # FAILED is not a blocked status, so the job can still be re-processed in
+    # place instead of being wedged forever.
+    monkeypatch.setattr(app_module, "RecoveryOrchestrator", _FakeOrchestrator)
+    with client.stream("GET", f"/api/jobs/{job_id}/process-stream", params={"api_key": "fake-key"}) as response:
+        first = None
+        for line in response.iter_lines():
+            if line.startswith("data: "):
+                first = json.loads(line[len("data: "):])
+                break
+    assert first["type"] == "status_seen_at_pipeline_start"
+
+
+def _validate(client, job_id, claim_id, value="confirmed", name="Ana", role="linguist", notes=None):
+    return client.post(
+        f"/api/jobs/{job_id}/claims/{claim_id}/validate",
+        json={"validator_name": name, "validator_role": role, "decision_value": value, "notes": notes},
+    )
+
+
+def test_validation_is_persisted_as_an_audit_record(client):
+    """2026-08-26 audit M3: the Validation (who/when/notes) used to be
+    returned once and dropped - Job had nowhere to keep it."""
+    db = job_store.DEFAULT_DB_PATH
+    job = _job_with_pending_claims(db, "c1", "c2")
+
+    r = _validate(client, job.job_id, "c1", value="kuyfi", name="Marta", role="community elder", notes="checked against grandmother's usage")
+    assert r.status_code == 200
+
+    reloaded = job_store.get_job(db, job.job_id)
+    assert len(reloaded.validations) == 1
+    v = reloaded.validations[0]
+    assert (v.claim_id, v.validator_name, v.validator_role, v.decision_value) == \
+        ("c1", "Marta", "community elder", "kuyfi")
+    assert v.notes == "checked against grandmother's usage" and v.timestamp
+    # job still WAITING_HUMAN because c2 is still pending
+    assert reloaded.status == JobStatus.WAITING_HUMAN
+
+    # second validation appends, and the last pending claim flips job -> COMPLETED
+    _validate(client, job.job_id, "c2", value="pu")
+    reloaded = job_store.get_job(db, job.job_id)
+    assert [x.claim_id for x in reloaded.validations] == ["c1", "c2"]
+    assert reloaded.status == JobStatus.COMPLETED
+
+
+def test_validate_rejects_non_pending_claim_with_409(client):
+    db = job_store.DEFAULT_DB_PATH
+    job = _job_with_pending_claims(db, "c1")
+    assert _validate(client, job.job_id, "c1").status_code == 200
+    # already COMMUNITY_VALIDATED now
+    again = _validate(client, job.job_id, "c1")
+    assert again.status_code == 409
+    # and no phantom second audit record was written
+    assert len(job_store.get_job(db, job.job_id).validations) == 1
+
+
+def test_validate_unknown_job_and_claim_are_404(client):
+    db = job_store.DEFAULT_DB_PATH
+    job = _job_with_pending_claims(db, "c1")
+    assert _validate(client, "no-such-job", "c1").status_code == 404
+    assert _validate(client, job.job_id, "no-such-claim").status_code == 404
 
 
 def test_second_process_stream_call_is_rejected_while_running(client, monkeypatch):

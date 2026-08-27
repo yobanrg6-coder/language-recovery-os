@@ -161,6 +161,12 @@
 const API_KEY_PARAM = new URLSearchParams(location.search).get('api_key') || '';
 let currentJob = null;
 const claimEls = {};
+let validationsByClaim = {};
+
+function indexValidations(job) {
+  validationsByClaim = {};
+  for (const v of (job && job.validations) || []) validationsByClaim[v.claim_id] = v;
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -301,6 +307,7 @@ function handleEvent(data) {
   } else if (data.type === 'complete') {
     logEvent('complete', data.message);
     finishPipeline();
+    indexValidations(data.data);
     renderSummary(data.data);
     for (const claim of data.data.claims) upsertClaimCard(claim);
   }
@@ -362,7 +369,7 @@ function upsertClaimCard(claim) {
   const pct = claim.combined_confidence != null ? Math.round(claim.combined_confidence * 100) : null;
   const evidenceHtml = (claim.evidence || []).map(e => `
     <li class="stance-${e.stance}"><strong>${e.stance}</strong> (${(e.support_score * 100).toFixed(0)}%)
-      - ${escapeHtml(e.source_id)} <em>${escapeHtml(e.locator)}</em>: ${escapeHtml(e.snippet).slice(0, 160)}</li>
+      - ${escapeHtml(e.source_id)} <em>${escapeHtml(e.locator)}</em>: ${escapeHtml(String(e.snippet == null ? '' : e.snippet).slice(0, 160))}</li>
   `).join('');
   const linguistHtml = claim.linguist_proposal ? `
     <div class="linguist-box">
@@ -373,11 +380,19 @@ function upsertClaimCard(claim) {
   const needsValidation = claim.status === 'NEEDS_VALIDATION' || claim.status === 'CONFLICTED';
   const validateHtml = needsValidation ? renderValidateBox(claim) : '';
 
+  const v = validationsByClaim[claim.claim_id];
+  const validatedHtml = (claim.status === 'COMMUNITY_VALIDATED' && v) ? `
+    <div class="linguist-box" style="background:rgba(122,79,129,0.10)">
+      <strong>Validated by:</strong> ${escapeHtml(v.validator_name)} (${escapeHtml(v.validator_role)})
+      &middot; ${escapeHtml(v.timestamp)}${v.notes ? `<br/><span style="color:var(--muted)">${escapeHtml(v.notes)}</span>` : ''}
+    </div>` : '';
+
   el.innerHTML = `
     <h3>"${escapeHtml(claim.value)}" <span class="badge ${claim.status}">${claim.status.replace('_', ' ')}</span></h3>
     <div class="confidence">${escapeHtml(claim.segment_label || claim.source_id)}${pct != null ? ` &middot; confidence ${pct}%` : ''}${claim.recommended_action ? ` &middot; ${claim.recommended_action.replace('_', ' ')}` : ''}</div>
     <ul class="evidence-list">${evidenceHtml || '<li>No evidence found yet.</li>'}</ul>
     ${linguistHtml}
+    ${validatedHtml}
     ${validateHtml}
   `;
   if (needsValidation) wireValidateBox(el, claim);
@@ -413,6 +428,7 @@ function wireValidateBox(el, claim) {
       if (!res.ok) throw new Error(await res.text());
       const result = await res.json();
       logEvent('complete', `Validated "${value}" - knowledge graph updated.`);
+      indexValidations(result.job);
       renderSummary(result.job);
       const updated = result.job.claims.find(c => c.claim_id === claim.claim_id);
       if (updated) upsertClaimCard(updated);
@@ -425,9 +441,14 @@ function wireValidateBox(el, claim) {
 }
 
 function escapeHtml(str) {
+  // Text-node serialization escapes & < > but NOT quotes, so the raw result
+  // is unsafe inside a double-quoted attribute (e.g. renderValidateBox's
+  // value="..."). Encode both quote characters too so this one helper is
+  // safe in text AND attribute context - a claim.value / decision_value is
+  // LLM- or user-supplied free text.
   const div = document.createElement('div');
   div.textContent = str == null ? '' : String(str);
-  return div.innerHTML;
+  return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 </script>
 </body>

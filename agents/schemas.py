@@ -118,7 +118,11 @@ class TranscriptionHypothesis(BaseModel):
 
 
 class TranscriptionOutput(BaseModel):
-    source_id: str
+    # Defaulted: the orchestrator always overwrites this with the real
+    # Source.source_id after the call (agents/orchestrator.py::
+    # _transcribe_audio), so requiring it here only forced the model to
+    # invent a value it has no way to know.
+    source_id: str = ""
     hypotheses: list[TranscriptionHypothesis] = Field(default_factory=list)
 
 
@@ -227,5 +231,10 @@ class Job(BaseModel):
     status: JobStatus = JobStatus.QUEUED
     sources: list[Source] = Field(default_factory=list)
     claims: list[Claim] = Field(default_factory=list)
+    # Append-only audit trail of every human validation applied to this
+    # job's claims -- who, what value, when. Kept on the Job (not the Claim)
+    # so the record survives even if a claim is later re-scored, and so the
+    # provenance guarantee covers the human step too, not just the agents'.
+    validations: list[Validation] = Field(default_factory=list)
     archive_analysis: ArchiveAnalysis | None = None
     created_at: str

@@ -15,6 +15,7 @@ from agents.scoring import (
     ACTION_AUTO_ACCEPT,
     ACTION_HUMAN_VALIDATION,
     ACTION_KEEP_HYPOTHESIS,
+    ConfidenceWeights,
     apply_community_validation,
     merge_conflict_checks,
     score_claim,
@@ -58,6 +59,40 @@ def test_moderate_evidence_keeps_hypothesis_not_auto_accept():
         Evidence(source_id="dict_1", locator="L1", snippet="mari - diez", stance=EvidenceStance.SUPPORTS, support_score=0.85, rationale="plausible match"),
     ]
     scored = score_claim(claim, transcription_confidence=0.85, evidence=evidence, conflicts=[])
+    assert scored.status == ClaimStatus.HYPOTHESIS
+    assert scored.recommended_action == ACTION_KEEP_HYPOTHESIS
+
+
+def test_single_source_cannot_auto_accept_even_at_high_score():
+    """2026-08-26 audit M4 / Rule 3: three strong SUPPORTS snippets but all
+    from the SAME source must not auto-accept - corroboration is measured in
+    distinct sources, not in how many times one document was quoted."""
+    claim = _base_claim()
+    evidence = [
+        Evidence(source_id="dict_1", locator=f"L{i}", snippet="mari - diez", stance=EvidenceStance.SUPPORTS, support_score=1.0, rationale="exact match")
+        for i in range(1, 4)
+    ]
+    # Weights deliberately skewed so a single source WOULD clear 0.85 on the
+    # arithmetic alone (0.6*1 + 0.3*1 + 0.1*0.33 = 0.93) - only Rule 3's
+    # explicit >=2-distinct-sources floor stops the auto-accept here.
+    skewed = ConfidenceWeights(transcription=0.6, evidence_support=0.3, cross_source_agreement=0.1)
+    scored = score_claim(claim, transcription_confidence=1.0, evidence=evidence, conflicts=[], weights=skewed)
+    assert scored.combined_confidence >= 0.85
+    assert scored.status == ClaimStatus.HYPOTHESIS
+    assert scored.recommended_action == ACTION_KEEP_HYPOTHESIS
+
+
+def test_contradicting_evidence_blocks_auto_accept():
+    """2026-08-26 audit M4 / Rule 4: a snippet the Evidence Agent itself
+    flagged as CONTRADICTS drops the claim to a hypothesis even if the
+    Conflict Agent raised nothing and the score cleared 0.85."""
+    claim = _base_claim()
+    evidence = [
+        Evidence(source_id="dict_1", locator="L1", snippet="mari - diez", stance=EvidenceStance.SUPPORTS, support_score=0.95, rationale="match"),
+        Evidence(source_id="grammar_1", locator="L2", snippet="mari as numeral", stance=EvidenceStance.SUPPORTS, support_score=0.95, rationale="match"),
+        Evidence(source_id="corpus_1", locator="L3", snippet="different sense", stance=EvidenceStance.CONTRADICTS, support_score=0.0, rationale="conflicting usage"),
+    ]
+    scored = score_claim(claim, transcription_confidence=0.95, evidence=evidence, conflicts=[], has_conflict=False)
     assert scored.status == ClaimStatus.HYPOTHESIS
     assert scored.recommended_action == ACTION_KEEP_HYPOTHESIS
 

@@ -5,6 +5,7 @@ recovery pipeline, and a human-validation endpoint that resumes a
 WAITING_HUMAN job.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -107,6 +108,7 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 UPLOAD_ROOT = Path(PROJECT_ROOT) / "data" / "uploads"
 DEMO_DATA_ROOT = Path(PROJECT_ROOT) / "demo_data"
 MAX_UPLOAD_BYTES = 60 * 1024 * 1024  # 60MB - generous for the demo audio + PDFs, not unbounded
+MAX_FILES_PER_JOB = 25  # an archive job is a handful of documents, not a bulk dump
 
 _FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -155,7 +157,9 @@ async def health_check():
 
 @app.get("/api/jobs/recent")
 async def recent_jobs(limit: int = 20):
-    return job_store.list_recent_jobs(job_store.DEFAULT_DB_PATH, limit=min(limit, 50))
+    # clamp to [1, 50] - a negative limit reaches SQLite as `LIMIT -1`, which
+    # it interprets as "no limit" and dumps every row.
+    return job_store.list_recent_jobs(job_store.DEFAULT_DB_PATH, limit=max(1, min(limit, 50)))
 
 
 @app.get("/api/jobs/{job_id}")
@@ -182,6 +186,8 @@ async def create_job(
         raise HTTPException(status_code=400, detail=f"manifest is not valid JSON: {exc}") from exc
     if len(entries) != len(files):
         raise HTTPException(status_code=400, detail="manifest length must match number of files")
+    if len(files) > MAX_FILES_PER_JOB:
+        raise HTTPException(status_code=400, detail=f"Too many files: max {MAX_FILES_PER_JOB} per job")
 
     job_id = uuid.uuid4().hex
     upload_dir = UPLOAD_ROOT / job_id
@@ -244,7 +250,10 @@ async def create_demo_job(request: Request):
         src_path = DEMO_DATA_ROOT / relative_path
         if not src_path.exists():
             raise HTTPException(status_code=500, detail=f"Demo data file missing on server: {relative_path}")
-        safe_name = _safe_filename(Path(relative_path).name)
+        # Same i-prefix as /api/jobs so two demo sources with the same
+        # basename could never overwrite each other on disk (the 4 curated
+        # names differ today, but keep the two paths consistent).
+        safe_name = f"{i}_{_safe_filename(Path(relative_path).name)}"
         shutil.copyfile(src_path, upload_dir / safe_name)
         sources.append(
             Source(
@@ -277,51 +286,64 @@ async def process_stream(job_id: str, request: Request, api_key: str | None = No
     resolved_key = api_key or os.getenv("GEMINI_API_KEY")
     upload_dir = UPLOAD_ROOT / job_id
 
-    # Re-running the pipeline rebuilds job.claims from scratch (see
-    # RecoveryOrchestrator.build_recovery_stream), which would silently wipe
-    # any COMMUNITY_VALIDATED claims a human already confirmed on a prior
-    # run - found 2026-08-22 auditing the "click Process Archive twice"
-    # path, which nothing else on the frontend prevents. A job that already
-    # ran to a real outcome (or is running right now) must be re-created as
-    # a new job to be re-processed, never silently reprocessed in place.
-    _ALREADY_PROCESSED_STATUSES = {JobStatus.RUNNING, JobStatus.WAITING_HUMAN, JobStatus.COMPLETED}
-
     async def event_generator():
-        if job.status in _ALREADY_PROCESSED_STATUSES:
-            message = (
-                f"This job already {'has results' if job.status != JobStatus.RUNNING else 'is being processed'} "
-                f"(status={job.status.value}). Re-processing in place would discard any human validations already "
-                "recorded on it - create a new job to run the pipeline again."
-            )
-            yield f"data: {json.dumps({'type': 'error', 'message': message}, ensure_ascii=False)}\n\n"
-            return
         if not resolved_key:
             yield f"data: {json.dumps({'type': 'error', 'message': 'Missing GEMINI_API_KEY: set it in .env or pass it as a query param.'}, ensure_ascii=False)}\n\n"
             return
 
-        running_job = job.model_copy(update={"status": JobStatus.RUNNING})
-        job_store.save_job(job_store.DEFAULT_DB_PATH, running_job)
+        # Atomically claim the job (QUEUED/FAILED -> RUNNING in one
+        # write-locked transaction). A stale in-memory status check here let
+        # a double click or an EventSource auto-reconnect start the pipeline
+        # twice on the same job - double Gemini spend, and re-running rebuilds
+        # job.claims from scratch, wiping any COMMUNITY_VALIDATED claims a
+        # human already confirmed. If the claim fails the job is already
+        # running or finished; it must be re-created to run again.
+        running_job = job_store.try_claim_job(job_store.DEFAULT_DB_PATH, job_id)
+        if running_job is None:
+            current = job_store.get_job(job_store.DEFAULT_DB_PATH, job_id)
+            status_value = current.status.value if current else "unknown"
+            being_processed = current is not None and current.status == JobStatus.RUNNING
+            message = (
+                f"This job already {'is being processed' if being_processed else 'has results'} "
+                f"(status={status_value}). Re-processing in place would discard any human validations "
+                "already recorded on it - create a new job to run the pipeline again."
+            )
+            yield f"data: {json.dumps({'type': 'error', 'message': message}, ensure_ascii=False)}\n\n"
+            return
 
         try:
             orchestrator = RecoveryOrchestrator(api_key=resolved_key)
         except Exception:
             logger.exception("Failed to initialize RecoveryOrchestrator")
+            job_store.save_job(job_store.DEFAULT_DB_PATH, running_job.model_copy(update={"status": JobStatus.FAILED}))
             yield f"data: {json.dumps({'type': 'error', 'message': 'Could not initialize the orchestrator. Check that the Gemini API key is valid.'}, ensure_ascii=False)}\n\n"
             return
 
         try:
-            async for event in orchestrator.build_recovery_stream(job, upload_dir):
+            async for event in orchestrator.build_recovery_stream(running_job, upload_dir):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except asyncio.CancelledError:
+            # Client disconnected (tab closed, EventSource dropped) or Cloud
+            # Run hit its request deadline mid-stream. CancelledError is a
+            # BaseException in Python 3.8+, so the generic handler below never
+            # ran - the job was left stuck at RUNNING, which then blocks it
+            # from ever being retried. Persist FAILED (a claimable state, so
+            # a re-run is allowed) and re-raise: never swallow a cancellation.
+            logger.warning("Recovery stream cancelled for job %s; marking FAILED", job_id)
+            job_store.save_job(job_store.DEFAULT_DB_PATH, running_job.model_copy(update={"status": JobStatus.FAILED}))
+            raise
         except Exception:
             logger.exception("Recovery pipeline failed")
-            failed_job = job.model_copy(update={"status": JobStatus.FAILED})
-            job_store.save_job(job_store.DEFAULT_DB_PATH, failed_job)
+            job_store.save_job(job_store.DEFAULT_DB_PATH, running_job.model_copy(update={"status": JobStatus.FAILED}))
             error_event = {"type": "error", "message": "The agent pipeline failed during execution. Check the server logs for technical detail."}
             yield f"data: {json.dumps(error_event, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_generator(),
-        media_type="text/event-stream",
+        # Explicit charset: Starlette does not add one for a raw
+        # media_type=..., and the stream carries non-ASCII transcriptions
+        # (accented text, diacritics) as UTF-8 via ensure_ascii=False.
+        media_type="text/event-stream; charset=utf-8",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
 
@@ -333,41 +355,54 @@ async def validate_claim(job_id: str, claim_id: str, req: ValidationRequest, req
     is what lets a WAITING_HUMAN job resume: if this was the last pending
     claim, the job flips to COMPLETED in the same call (master spec H5)."""
     _check_rate_limit(_get_client_ip(request))
-    job = job_store.get_job(job_store.DEFAULT_DB_PATH, job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
 
-    claim_index = next((i for i, c in enumerate(job.claims) if c.claim_id == claim_id), None)
-    if claim_index is None:
-        raise HTTPException(status_code=404, detail="Claim not found")
-
-    current_status = job.claims[claim_index].status.value
-    if current_status not in ("NEEDS_VALIDATION", "CONFLICTED"):
-        # Without this, POSTing here on an already-SUPPORTED/HYPOTHESIS/
-        # COMMUNITY_VALIDATED claim silently overwrites its value and forces
-        # it to COMMUNITY_VALIDATED, bypassing the deterministic confidence
-        # engine entirely - found 2026-08-22, since job_id/claim_id are both
-        # visible in ordinary API responses and this endpoint has no auth.
-        raise HTTPException(
-            status_code=409,
-            detail=f"Claim is '{current_status}', not pending human validation - it cannot be re-validated.",
-        )
-
-    updated_claim = job.claims[claim_index].model_copy(update={"value": req.decision_value})
-    updated_claim = apply_community_validation(updated_claim)
     validation = Validation(
         claim_id=claim_id, validator_name=req.validator_name, validator_role=req.validator_role,
         decision_value=req.decision_value, notes=req.notes, timestamp=datetime.now(UTC).isoformat(),
     )
 
-    new_claims = list(job.claims)
-    new_claims[claim_index] = updated_claim
-    still_pending = any(c.status.value in ("NEEDS_VALIDATION", "CONFLICTED") for c in new_claims)
-    new_status = JobStatus.WAITING_HUMAN if still_pending else JobStatus.COMPLETED
-    job = job.model_copy(update={"claims": new_claims, "status": new_status})
-    job_store.save_job(job_store.DEFAULT_DB_PATH, job)
+    def _apply(job: Job) -> Job:
+        # Runs inside job_store.mutate_job's write-locked transaction, so the
+        # read (claim status), the recompute (still-pending -> job status)
+        # and the write are one atomic step - two validators confirming
+        # different claims of the same job can no longer clobber each other.
+        claim_index = next((i for i, c in enumerate(job.claims) if c.claim_id == claim_id), None)
+        if claim_index is None:
+            raise HTTPException(status_code=404, detail="Claim not found")
 
-    return {"job": job.model_dump(), "validation": validation.model_dump()}
+        current_status = job.claims[claim_index].status.value
+        if current_status not in ("NEEDS_VALIDATION", "CONFLICTED"):
+            # Without this, POSTing here on an already-SUPPORTED/HYPOTHESIS/
+            # COMMUNITY_VALIDATED claim silently overwrites its value and
+            # forces it to COMMUNITY_VALIDATED, bypassing the deterministic
+            # confidence engine - found 2026-08-22, since job_id/claim_id are
+            # both visible in ordinary API responses and this endpoint has no
+            # auth.
+            raise HTTPException(
+                status_code=409,
+                detail=f"Claim is '{current_status}', not pending human validation - it cannot be re-validated.",
+            )
+
+        updated_claim = apply_community_validation(
+            job.claims[claim_index].model_copy(update={"value": req.decision_value})
+        )
+        new_claims = list(job.claims)
+        new_claims[claim_index] = updated_claim
+        still_pending = any(c.status.value in ("NEEDS_VALIDATION", "CONFLICTED") for c in new_claims)
+        new_status = JobStatus.WAITING_HUMAN if still_pending else JobStatus.COMPLETED
+        return job.model_copy(
+            update={
+                "claims": new_claims,
+                "status": new_status,
+                "validations": [*job.validations, validation],
+            }
+        )
+
+    updated_job = job_store.mutate_job(job_store.DEFAULT_DB_PATH, job_id, _apply)
+    if updated_job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    return {"job": updated_job.model_dump(), "validation": validation.model_dump()}
 
 
 # run.py is the one real entrypoint (fail-fast config check, configurable

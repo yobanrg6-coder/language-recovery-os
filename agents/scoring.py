@@ -4,8 +4,7 @@ the model's own confidence number". Combines transcription confidence,
 judged-evidence support, and cross-source agreement into a single combined
 confidence, applies the fixed thresholds from the master spec (section
 274-292: >=0.85 auto-accept, 0.65-0.84 supported hypothesis, <0.65 human
-validation), and enforces two hard rules an LLM is never trusted to apply
-to itself:
+validation), and enforces four hard rules an LLM is never trusted to apply to itself:
 
   1. A claim with zero supporting evidence can never auto-accept, no matter
      how confident the transcription step was (master spec principle #1,
@@ -13,6 +12,12 @@ to itself:
      test_claim_without_evidence_cannot_auto_accept).
   2. A claim with an unresolved conflict (ConflictAgent found one) always
      routes to human validation, regardless of score (section 7.7).
+  3. Auto-accept requires supporting evidence from at least two distinct
+     sources -- one agent's confident "supports" on one snippet is never
+     enough by itself; below two sources the best a claim can be is a
+     hypothesis.
+  4. If the Evidence Agent judged any snippet as *contradicting* the claim,
+     auto-accept is blocked even when the Conflict Agent raised nothing.
 """
 
 from __future__ import annotations
@@ -89,6 +94,24 @@ def score_claim(
 
     has_any_evidence = len(evidence) > 0
     has_supporting_evidence = evidence_support > 0.0
+    supporting_source_count = len({e.source_id for e in evidence if e.stance == EvidenceStance.SUPPORTS})
+    has_contradicting_evidence = any(e.stance == EvidenceStance.CONTRADICTS for e in evidence)
+
+    # Rule 3: auto-accept requires corroboration from at least TWO distinct
+    # sources. One agent judging one snippet as "strongly supports", however
+    # confident, is never enough on its own -- the accept decision is
+    # deterministic, but its inputs are still LLM judgments, so the floor is
+    # multi-source agreement, not a single high number. (The weighted score
+    # already trends this way; making it an explicit floor keeps the
+    # guarantee even if the weights are ever retuned.)
+    # Rule 4: any snippet the Evidence Agent itself judged as *contradicting*
+    # the claim blocks auto-accept regardless of score -- it drops to a
+    # hypothesis a human weighs, even when the Conflict Agent raised nothing.
+    can_auto_accept = (
+        combined >= AUTO_ACCEPT_THRESHOLD
+        and supporting_source_count >= 2
+        and not has_contradicting_evidence
+    )
 
     if has_conflict:
         status = ClaimStatus.CONFLICTED
@@ -98,7 +121,7 @@ def score_claim(
         # if transcription confidence alone would have cleared 0.85.
         status = ClaimStatus.NEEDS_VALIDATION
         action = ACTION_HUMAN_VALIDATION
-    elif combined >= AUTO_ACCEPT_THRESHOLD:
+    elif can_auto_accept:
         status = ClaimStatus.SUPPORTED
         action = ACTION_AUTO_ACCEPT
     elif combined >= SUPPORTED_HYPOTHESIS_THRESHOLD:
@@ -121,6 +144,8 @@ def score_claim(
                 "evidence_support": round(evidence_support, 4),
                 "cross_source_agreement": round(cross_source, 4),
                 "conflict_penalty_applied": weights.conflict_penalty if has_conflict else 0.0,
+                "supporting_sources": float(supporting_source_count),
+                "contradicting_evidence": 1.0 if has_contradicting_evidence else 0.0,
             },
         }
     )

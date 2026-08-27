@@ -5,7 +5,7 @@
 [![Cloud](https://img.shields.io/badge/Deployment-Google%20Cloud%20Run-FBBC05?logo=google-cloud&logoColor=white)](https://cloud.google.com/run)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> Built for the official **Google Cloud "All Things Agentic" Hackathon** ($180,000 USD Prize Pool) under **The Taskmaster** category.
+> Built for the official **Google Cloud "All Things Agentic" Hackathon** ($180,000 USD Prize Pool) under **The Collaborative Partner** category.
 
 **Live demo:** https://language-recovery-os-520298138105.us-central1.run.app
 
@@ -128,13 +128,19 @@ gcloud run deploy language-recovery-os --source . --region=us-central1
 # Secret Manager once, then reference it by name on deploy:
 echo -n "your_actual_gemini_api_key" | gcloud secrets create gemini-api-key --data-file=-
 gcloud run deploy language-recovery-os --source . --region=us-central1 \
-    --allow-unauthenticated --min-instances=1 --max-instances=1 \
+    --allow-unauthenticated --min-instances=1 --max-instances=1 --timeout=900 \
     --set-env-vars WEB_APP_HOST=0.0.0.0,MODEL=gemini-flash-lite-latest \
     --set-secrets GEMINI_API_KEY=gemini-api-key:latest
 ```
 
 `--min-instances=1` keeps a warm instance running so judges never hit a cold-start abort
 (`"no available instance"` 500) on the first request after idle.
+
+`--timeout=900` raises Cloud Run's per-request deadline from the 300s default: the recovery
+pipeline is one long SSE response, and a multi-segment audio archive (transcription retries +
+per-claim evidence/linguist/conflict calls) can run past 5 minutes. If the request is killed
+mid-stream the job is persisted as `FAILED` and can be re-run, but the longer deadline avoids
+the interruption in the first place.
 
 ---
 

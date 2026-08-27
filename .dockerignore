@@ -2,10 +2,19 @@ venv/
 __pycache__/
 *.pyc
 .env
+.env.*
+!.env.example
 data/uploads/
 data/*.db
 tests/
 .git/
+.pytest_cache/
+
+# Internal Spanish working notes + early aspirational spec (Firestore/RAG
+# Engine/Spanner that were never built) - gitignored, and no reason to bake
+# them into the deployed image either.
+BITACORA_PROYECTO.md
+Language_Recovery_OS_Project_4_Master.md
 # demo_data/corpus_repo/ trimmed 2026-08-19 from 3106 files/97MB to 3
 # curated pairs (~1MB) -- see demo_data/SOURCES.md. Small enough now to
 # ship in the image; not excluded. Its nested .git/ (from the original
