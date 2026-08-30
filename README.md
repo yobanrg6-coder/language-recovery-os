@@ -7,6 +7,13 @@
 
 > Built for the official **Google Cloud "All Things Agentic" Hackathon** ($180,000 USD Prize Pool) under **The Collaborative Partner** category.
 
+> One of four projects on the same spine — an LLM proposes structure, deterministic
+> code decides the outcome, and every claim is grounded in an independent source.
+> Here it's the archive's own **dictionary, grammar and corpus**; a point-in-time
+> Wayback capture in [The Promise Ledger](https://devpost.com/software/the-promise-ledger),
+> Mexico's SAT shell-company blacklist in [Trusted Hire México](https://devpost.com/software/trusted-hire-mexico),
+> versioned business rules in [ScopeCouncil](https://devpost.com/software/scopecouncil).
+
 **Live demo:** https://language-recovery-os-520298138105.us-central1.run.app
 
 ---
